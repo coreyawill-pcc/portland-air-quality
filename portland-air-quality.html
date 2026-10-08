@@ -1,0 +1,252 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Portland Air Quality Map</title>
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css">
+<style>
+  :root{
+    --ink:#1d2b2a; --muted:#5d6e6c; --paper:#f6f8f7; --line:#d5dedb; --accent:#0d6b63;
+    --g:#2f9e44; --y:#f2c200; --o:#f08c00; --r:#e03131; --p:#8f3f97; --m:#7e0023;
+  }
+  @media (prefers-color-scheme: dark){
+    :root:not([data-theme="light"]){--ink:#e6efed;--muted:#9bb0ad;--paper:#14201f;--line:#2b3c3a;--accent:#4fd1c5}
+  }
+  :root[data-theme="dark"]{--ink:#e6efed;--muted:#9bb0ad;--paper:#14201f;--line:#2b3c3a;--accent:#4fd1c5}
+  *{box-sizing:border-box}
+  html,body{height:100%;margin:0;background:var(--paper);color:var(--ink);
+    font-family:"Source Sans 3","Segoe UI",system-ui,sans-serif}
+  .app{display:grid;grid-template-columns:1fr 380px;height:100%}
+  #map{height:100%;min-height:0}
+  aside{border-left:1px solid var(--line);display:flex;flex-direction:column;min-height:0;overflow:auto;background:var(--paper)}
+  header{padding:18px 20px 12px;border-bottom:1px solid var(--line)}
+  h1{font-size:1.35rem;margin:0 0 2px;font-weight:700;letter-spacing:-.01em}
+  .sub{color:var(--muted);font-size:.9rem;margin:0}
+  .controls{padding:12px 20px;display:grid;gap:10px;border-bottom:1px solid var(--line)}
+  label{font-size:.85rem;color:var(--muted);display:grid;gap:4px}
+  select,input,button{font:inherit;color:var(--ink);background:transparent;border:1px solid var(--line);border-radius:6px;padding:7px 9px}
+  button{cursor:pointer;background:var(--accent);color:#fff;border-color:var(--accent)}
+  button:focus-visible,select:focus-visible,input:focus-visible{outline:3px solid var(--accent);outline-offset:2px}
+  #keyrow{display:none}
+  #status{font-size:.82rem;color:var(--muted);padding:8px 20px;border-bottom:1px solid var(--line)}
+  #detail{padding:16px 20px;flex:1}
+  .big{display:flex;align-items:baseline;gap:12px}
+  .big .num{font-size:3.4rem;font-weight:800;line-height:1;padding:4px 12px;border-radius:8px;color:#fff}
+  .big .cat{font-size:1.05rem;font-weight:600}
+  .meta{color:var(--muted);font-size:.88rem;margin:8px 0 14px}
+  .range{display:flex;gap:6px;margin:0 0 10px}
+  .range button{background:transparent;color:var(--ink);border-color:var(--line);padding:4px 10px;font-size:.85rem}
+  .range button[aria-pressed="true"]{background:var(--accent);color:#fff;border-color:var(--accent)}
+  #chart{width:100%;height:230px;display:block}
+  .stats{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-top:12px;font-size:.85rem}
+  .stats div{border-top:2px solid var(--line);padding-top:6px;color:var(--muted)}
+  .stats b{display:block;color:var(--ink);font-size:1.1rem}
+  .empty{color:var(--muted)}
+  .legend{display:flex;flex-wrap:wrap;gap:4px 12px;padding:12px 20px;border-top:1px solid var(--line);font-size:.78rem;color:var(--muted)}
+  .legend i{display:inline-block;width:11px;height:11px;border-radius:3px;margin-right:5px;vertical-align:-1px}
+  .aqi-pin{display:grid;place-items:center;border-radius:50%;color:#fff;font-weight:700;font-size:12px;
+    border:2px solid #fff;box-shadow:0 1px 4px rgba(0,0,0,.45);width:34px;height:34px}
+  .aqi-pin.sel{outline:3px solid #000;outline-offset:2px}
+  @media (max-width:800px){
+    .app{grid-template-columns:1fr;grid-template-rows:55% 45%}
+    aside{border-left:0;border-top:1px solid var(--line)}
+  }
+</style>
+</head>
+<body>
+<div class="app">
+  <div id="map" role="application" aria-label="Map of Portland air quality stations"></div>
+  <aside>
+    <header>
+      <h1>Portland air quality</h1>
+      <p class="sub">Select a station to see its AQI history.</p>
+    </header>
+    <div class="controls">
+      <label>Data source
+        <select id="source">
+          <option value="om">Open-Meteo (no key needed)</option>
+          <option value="pa">PurpleAir sensors (API key)</option>
+        </select>
+      </label>
+      <label id="keyrow">PurpleAir read API key
+        <input id="key" type="password" autocomplete="off" placeholder="Paste read key">
+      </label>
+      <label>Basemap (Esri)
+        <select id="basemap">
+          <option value="World_Street_Map">Streets</option>
+          <option value="World_Topo_Map">Topographic</option>
+          <option value="Canvas/World_Light_Gray_Base">Light gray canvas</option>
+          <option value="Canvas/World_Dark_Gray_Base">Dark gray canvas</option>
+          <option value="World_Imagery">Imagery</option>
+        </select>
+      </label>
+      <button id="refresh" type="button">Refresh now</button>
+    </div>
+    <div id="status" role="status" aria-live="polite">Loading…</div>
+    <div id="detail"><p class="empty">No station selected.</p></div>
+    <div class="legend" id="legend"></div>
+  </aside>
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
+<script>
+(function(){
+  var BANDS=[[50,'Good','#2f9e44'],[100,'Moderate','#f2c200'],[150,'Unhealthy for sensitive groups','#f08c00'],
+    [200,'Unhealthy','#e03131'],[300,'Very unhealthy','#8f3f97'],[500,'Hazardous','#7e0023']];
+  function band(a){for(var i=0;i<BANDS.length;i++)if(a<=BANDS[i][0])return BANDS[i];return BANDS[5];}
+  document.getElementById('legend').innerHTML=BANDS.map(function(b,i){
+    return '<span><i style="background:'+b[2]+'"></i>'+(i?BANDS[i-1][0]+1:0)+'–'+b[0]+'</span>';}).join('');
+
+  // US EPA PM2.5 -> AQI (2024 breakpoints)
+  var PM=[[0,9,0,50],[9.1,35.4,51,100],[35.5,55.4,101,150],[55.5,125.4,151,200],[125.5,225.4,201,300],[225.5,500,301,500]];
+  function pm2aqi(c){ if(c==null||isNaN(c))return null; c=Math.max(0,Math.floor(c*10)/10);
+    for(var i=0;i<PM.length;i++){var b=PM[i]; if(c<=b[1]) return Math.round((b[3]-b[2])/(b[1]-b[0])*(c-b[0])+b[2]);}
+    return 500; }
+  // EPA correction for PurpleAir (cf_1 + humidity)
+  function paCorrect(cf,rh){ if(cf==null)return null; if(rh==null)return cf; return cf<343?0.524*cf-0.0862*rh+5.75:cf; }
+
+  var STATIONS=[
+    ['Downtown',45.5152,-122.6784],['Cully',45.5625,-122.5990],['St. Johns',45.5906,-122.7531],
+    ['Sellwood',45.4640,-122.6520],['Hollywood',45.5350,-122.6200],['Lents',45.4770,-122.5650],
+    ['Hillsdale',45.4800,-122.7080],['Alberta',45.5590,-122.6450],['Kenton',45.5900,-122.6900],
+    ['Montavilla',45.5190,-122.5800],['Northwest',45.5400,-122.7100],['Gateway',45.5300,-122.5600]
+  ];
+
+  var map=L.map('map',{zoomControl:true}).setView([45.5272,-122.6600],11);
+  var baseLayer=null;
+  function setBase(name){
+    if(baseLayer)map.removeLayer(baseLayer);
+    // ArcGIS REST tile service: .../MapServer/tile/{z}/{y}/{x}
+    var path=name.indexOf('/')>-1?name:name;
+    baseLayer=L.tileLayer('https://services.arcgisonline.com/ArcGIS/rest/services/'+path+'/MapServer/tile/{z}/{y}/{x}',
+      {maxZoom:19,attribution:'Tiles &copy; Esri &mdash; Esri, HERE, Garmin, USGS, NGA'}).addTo(map);
+    baseLayer.bringToBack();
+  }
+  setBase('World_Street_Map');
+
+  var markers=L.layerGroup().addTo(map), current=[], selected=null, histCache={}, range=72;
+  var $=function(id){return document.getElementById(id);};
+  function status(t){$('status').textContent=t;}
+
+  function pin(s,sel){
+    var b=band(s.aqi==null?0:s.aqi);
+    return L.divIcon({className:'',iconSize:[34,34],iconAnchor:[17,17],
+      html:'<div class="aqi-pin'+(sel?' sel':'')+'" style="background:'+(s.aqi==null?'#888':b[2])+
+           ';color:'+(b[0]===100&&s.aqi!=null?'#222':'#fff')+'">'+(s.aqi==null?'–':s.aqi)+'</div>'});
+  }
+  function draw(){
+    markers.clearLayers();
+    current.forEach(function(s){
+      var m=L.marker([s.lat,s.lon],{icon:pin(s,selected&&selected.id===s.id),title:s.name+' – AQI '+s.aqi,keyboard:true,alt:s.name});
+      m.on('click',function(){select(s);});
+      m.addTo(markers);
+    });
+  }
+
+  /* ---------- Open-Meteo ---------- */
+  async function loadOM(){
+    var lat=STATIONS.map(function(s){return s[1];}).join(','), lon=STATIONS.map(function(s){return s[2];}).join(',');
+    var url='https://air-quality-api.open-meteo.com/v1/air-quality?latitude='+lat+'&longitude='+lon+
+      '&hourly=us_aqi,pm2_5&current=us_aqi,pm2_5&past_days=7&forecast_days=1&timezone=America%2FLos_Angeles';
+    var r=await fetch(url); if(!r.ok)throw new Error('Open-Meteo returned '+r.status);
+    var d=await r.json(); if(!Array.isArray(d))d=[d];
+    histCache={};
+    current=d.map(function(x,i){
+      var t=x.hourly.time, a=x.hourly.us_aqi, now=Date.now(), pts=[];
+      for(var k=0;k<t.length;k++){var ts=new Date(t[k]).getTime(); if(a[k]!=null&&ts<=now+36e5)pts.push([ts,a[k]]);}
+      var id='om'+i; histCache[id]=pts;
+      return {id:id,name:STATIONS[i][0],lat:STATIONS[i][1],lon:STATIONS[i][2],aqi:x.current.us_aqi,pm:x.current.pm2_5,src:'om'};
+    });
+    status('Updated '+new Date().toLocaleTimeString()+' · modeled hourly US AQI (CAMS) at '+current.length+' points');
+  }
+
+  /* ---------- PurpleAir ---------- */
+  async function loadPA(){
+    var key=$('key').value.trim(); if(!key)throw new Error('Enter a PurpleAir read API key.');
+    var url='https://api.purpleair.com/v1/sensors?fields=name,latitude,longitude,pm2.5_cf_1,humidity'+
+      '&location_type=0&max_age=3600&nwlng=-122.85&nwlat=45.65&selng=-122.47&selat=45.43';
+    var r=await fetch(url,{headers:{'X-API-Key':key}});
+    if(!r.ok)throw new Error('PurpleAir returned '+r.status+(r.status===403?' (check key)':''));
+    var d=await r.json(), f=d.fields, ix=function(n){return f.indexOf(n);};
+    histCache={};
+    current=d.data.map(function(row){
+      var pm=paCorrect(row[ix('pm2.5_cf_1')],row[ix('humidity')]);
+      return {id:'pa'+row[ix('sensor_index')],idx:row[ix('sensor_index')],name:row[ix('name')],
+        lat:row[ix('latitude')],lon:row[ix('longitude')],aqi:pm2aqi(pm),pm:pm,src:'pa'};
+    }).filter(function(s){return s.lat!=null&&s.aqi!=null;});
+    status('Updated '+new Date().toLocaleTimeString()+' · '+current.length+' PurpleAir outdoor sensors (EPA-corrected)');
+  }
+  async function histPA(s){
+    var key=$('key').value.trim(), start=Math.floor(Date.now()/1000)-7*86400;
+    var url='https://api.purpleair.com/v1/sensors/'+s.idx+'/history?fields=pm2.5_cf_1,humidity&average=60&start_timestamp='+start;
+    var r=await fetch(url,{headers:{'X-API-Key':key}}); if(!r.ok)throw new Error('History request failed ('+r.status+')');
+    var d=await r.json(), f=d.fields, ti=f.indexOf('time_stamp'), pi=f.indexOf('pm2.5_cf_1'), hi=f.indexOf('humidity');
+    return d.data.map(function(row){return [row[ti]*1000,pm2aqi(paCorrect(row[pi],row[hi]))];}).filter(function(p){return p[1]!=null;});
+  }
+
+  /* ---------- Detail panel + chart ---------- */
+  async function select(s){
+    selected=s; draw();
+    var b=band(s.aqi);
+    $('detail').innerHTML='<div class="big"><span class="num" style="background:'+b[2]+';color:'+(b[0]===100?'#222':'#fff')+'">'+s.aqi+
+      '</span><span class="cat">'+b[1]+'</span></div><p class="meta">'+s.name+
+      (s.pm!=null?' · PM2.5 '+s.pm.toFixed(1)+' µg/m³':'')+'</p>'+
+      '<div class="range" role="group" aria-label="History range">'+
+      [24,72,168].map(function(h){return '<button type="button" data-h="'+h+'" aria-pressed="'+(h===range)+'">'+(h===168?'7 days':h+' hours')+'</button>';}).join('')+
+      '</div><svg id="chart" role="img" aria-label="Historical AQI chart"></svg><div class="stats" id="stats"></div>';
+    $('detail').querySelectorAll('.range button').forEach(function(btn){
+      btn.onclick=function(){range=+btn.dataset.h;select(s);};});
+    try{
+      if(!histCache[s.id]){ $('chart').outerHTML='<p class="empty" id="chart">Loading history…</p>'; histCache[s.id]=await histPA(s); }
+      if(selected!==s)return;
+      if(!$('detail').querySelector('svg')){ var p=$('chart'); var sv=document.createElementNS('http://www.w3.org/2000/svg','svg'); sv.id='chart'; p.replaceWith(sv); }
+      plot(histCache[s.id]);
+    }catch(e){ $('chart').outerHTML='<p class="empty">'+e.message+'</p>'; }
+  }
+  function plot(all){
+    var cut=Date.now()-range*36e5, pts=all.filter(function(p){return p[0]>=cut;});
+    var svg=$('chart'), W=340,H=230,m={l:34,r:8,t:8,b:24}; svg.setAttribute('viewBox','0 0 '+W+' '+H);
+    if(pts.length<2){svg.innerHTML='<text x="10" y="30" fill="currentColor">Not enough data for this range.</text>';return;}
+    var vals=pts.map(function(p){return p[1];}), max=Math.max(60,Math.ceil(Math.max.apply(null,vals)/25)*25);
+    var x=function(t){return m.l+(t-pts[0][0])/(pts[pts.length-1][0]-pts[0][0])*(W-m.l-m.r);};
+    var y=function(v){return H-m.b-v/max*(H-m.t-m.b);};
+    var out='', prev=0;
+    BANDS.forEach(function(b){ if(prev>=max)return; var top=Math.min(b[0],max);
+      out+='<rect x="'+m.l+'" y="'+y(top)+'" width="'+(W-m.l-m.r)+'" height="'+(y(prev)-y(top))+'" fill="'+b[2]+'" opacity=".16"/>'; prev=b[0]; });
+    for(var v=0;v<=max;v+=max>150?50:25){ out+='<text x="'+(m.l-5)+'" y="'+(y(v)+4)+'" text-anchor="end" font-size="10" fill="currentColor" opacity=".7">'+v+'</text>'; }
+    var step=range===24?6:range===72?12:24, t0=new Date(pts[0][0]); t0.setMinutes(0,0,0);
+    for(var t=t0.getTime();t<=pts[pts.length-1][0];t+=36e5){var dt=new Date(t);
+      if(dt.getHours()===0&&range>24||(range===24&&dt.getHours()%6===0)){ if(t<pts[0][0])continue;
+        out+='<line x1="'+x(t)+'" x2="'+x(t)+'" y1="'+m.t+'" y2="'+(H-m.b)+'" stroke="currentColor" opacity=".12"/>'+
+        '<text x="'+x(t)+'" y="'+(H-8)+'" text-anchor="middle" font-size="10" fill="currentColor" opacity=".7">'+
+        (range===24?dt.getHours()+':00':(dt.getMonth()+1)+'/'+dt.getDate())+'</text>'; } }
+    out+='<polyline fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round" points="'+
+      pts.map(function(p){return x(p[0]).toFixed(1)+','+y(p[1]).toFixed(1);}).join(' ')+'"/>';
+    svg.innerHTML=out; svg.style.color='var(--ink)';
+    var avg=Math.round(vals.reduce(function(a,b){return a+b;},0)/vals.length);
+    $('stats').innerHTML='<div><b>'+Math.min.apply(null,vals)+'</b>low</div><div><b>'+avg+'</b>average</div><div><b>'+Math.max.apply(null,vals)+'</b>peak</div>';
+  }
+
+  /* ---------- wiring ---------- */
+  async function refresh(){
+    status('Loading…');
+    try{ if($('source').value==='om')await loadOM(); else await loadPA();
+      if(selected){var s=current.filter(function(c){return c.id===selected.id;})[0]; selected=null; if(s){selected=s;draw();select(s);return;}}
+      draw();
+    }catch(e){ status('Could not load data: '+e.message); }
+  }
+  $('source').onchange=function(){
+    $('keyrow').style.display=this.value==='pa'?'grid':'none'; selected=null; markers.clearLayers();
+    $('detail').innerHTML='<p class="empty">No station selected.</p>';
+    try{ var k=localStorage.getItem('pa_key'); if(k&&!$('key').value)$('key').value=k; }catch(e){}
+    if(this.value==='om'||$('key').value)refresh(); else status('Enter a PurpleAir read key, then press Refresh.');
+  };
+  $('key').onchange=function(){try{localStorage.setItem('pa_key',this.value.trim());}catch(e){}};
+  $('basemap').onchange=function(){setBase(this.value);};
+  $('refresh').onclick=function(){histCache={};refresh();};
+  refresh(); setInterval(refresh,10*60*1000);
+})();
+</script>
+</body>
+</html>
