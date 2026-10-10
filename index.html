@@ -56,6 +56,11 @@
   .legend-box .sw{width:14px;height:14px;flex:none;border-radius:3px;border:1px solid rgba(0,0,0,.35)}
   .legend-box .sw.dot{border-radius:50%;border:2px solid #fff;box-shadow:0 0 0 1px rgba(0,0,0,.35)}
   .legend-box .sw.line{background:transparent;border-width:3px;border-style:solid}
+  .biv{display:grid;grid-template-columns:16px auto;gap:3px;margin-top:4px;width:max-content}
+  .biv-y{writing-mode:vertical-rl;transform:rotate(180deg);display:flex;justify-content:space-between;font-size:.7rem;color:var(--muted)}
+  .biv-x{grid-column:2;display:flex;justify-content:space-between;font-size:.7rem;color:var(--muted)}
+  .biv-grid{display:grid;grid-template-columns:repeat(3,30px);grid-template-rows:repeat(3,30px);gap:1px}
+  .biv-note{font-size:.7rem;color:var(--muted);margin-top:4px;max-width:150px}
   @media (max-width:800px){
     .app{grid-template-columns:1fr;grid-template-rows:55% 45%}
     aside{border-left:0;border-top:1px solid var(--line)}
@@ -231,8 +236,8 @@
   /* ---------- ArcGIS Online layers ---------- */
   // DRAW ORDER: bigger number = drawn on top. Keep every value different (range 250-590;
   // 'stations' is the AQI pins and may go up to 640). Edit these numbers to reorder.
-  var DRAW_ORDER = { svi: 350, cully: 360, deq: 380, stations: 600 };
-  ['svi','cully','deq'].forEach(function(n){
+  var DRAW_ORDER = { svi: 350, biv: 355, cully: 360, deq: 380, stations: 600 };
+  ['svi','biv','cully','deq'].forEach(function(n){
     map.createPane(n); map.getPane(n).style.zIndex = DRAW_ORDER[n];
   });
   map.getPane('markerPane').style.zIndex = DRAW_ORDER.stations;
@@ -255,6 +260,62 @@
         'Cancer: '+pct(p.CANCER_Cru)+' · Asthma: '+pct(p.CASTHMA_Cr)+' · COPD: '+pct(p.COPD_Crude));
     }
   });
+
+  /* ---------- Bivariate: cancer prevalence x SVI (terciles) ---------- */
+  var TRACT_URL = 'https://services8.arcgis.com/tblHe99qQFMcNzpC/arcgis/rest/services/SVI_and_Cancer_by_Tract/FeatureServer/0';
+  // rows = cancer tier (0 low .. 2 high), columns = SVI tier (0 low .. 2 high)
+  var BIV_COLORS = [
+    ['#e8e8e8','#ace4e4','#5ac8c8'],
+    ['#dfb0d6','#a5add3','#5698b9'],
+    ['#be64ac','#8c62aa','#3b4994']
+  ];
+  var TIER_NAME = ['Low','Medium','High'], bivCuts = null;
+  function tierOf(v, c){ return v <= c[0] ? 0 : v <= c[1] ? 1 : 2; }
+  function bivTiers(p){
+    if (!bivCuts || p.SVI == null || p.SVI < 0 || p.CANCER_Cru == null || p.CANCER_Cru < 0) return null;
+    return [tierOf(p.SVI, bivCuts.svi), tierOf(p.CANCER_Cru, bivCuts.cancer)];
+  }
+  function bivStyle(f){
+    var t = bivTiers(f.properties);
+    return {color:'#ffffff', weight:1, fillColor: t ? BIV_COLORS[t[1]][t[0]] : '#999999', fillOpacity:0.75};
+  }
+  var biv = L.esri.featureLayer({
+    url: TRACT_URL,
+    pane: 'biv',
+    style: bivStyle,
+    onEachFeature: function(f, layer){
+      layer.bindPopup(function(){
+        var p = f.properties, t = bivTiers(p);
+        return '<b>Tract '+(p.TRACT||'')+'</b> · '+(p.CountyName||'')+' County<br>'+
+          'SVI: '+(p.SVI!=null && p.SVI>=0 ? p.SVI.toFixed(2) : '–')+(t?' ('+TIER_NAME[t[0]]+')':'')+'<br>'+
+          'Cancer prevalence: '+(p.CANCER_Cru!=null && p.CANCER_Cru>=0 ? p.CANCER_Cru+'%' : '–')+(t?' ('+TIER_NAME[t[1]]+')':'');
+      });
+    }
+  });
+  // One-time query to get tercile breaks across every tract in the service
+  L.esri.query({url: TRACT_URL}).where('1=1').fields(['SVI','CANCER_Cru']).returnGeometry(false).run(function(err, fc){
+    if (err || !fc || !fc.features || !fc.features.length) return;
+    function cuts(key){
+      var v = fc.features.map(function(f){return f.properties[key];})
+        .filter(function(x){return x != null && x >= 0;}).sort(function(a,b){return a-b;});
+      return v.length ? [v[Math.ceil(v.length/3)-1], v[Math.ceil(2*v.length/3)-1]] : null;
+    }
+    var a = cuts('SVI'), b = cuts('CANCER_Cru');
+    if (!a || !b) return;
+    bivCuts = {svi:a, cancer:b};
+    biv.setStyle(bivStyle);
+    if (typeof legend !== 'undefined' && legend.update) legend.update();
+  });
+  function bivLegendHtml(){
+    var cells = '';
+    for (var c = 2; c >= 0; c--) for (var sv = 0; sv < 3; sv++)
+      cells += '<span title="SVI: '+TIER_NAME[sv]+' · Cancer: '+TIER_NAME[c]+'" style="background:'+BIV_COLORS[c][sv]+'"></span>';
+    var note = bivCuts ? '<div class="biv-note">Terciles. Low ≤ '+bivCuts.svi[0].toFixed(2)+' SVI / '+bivCuts.cancer[0]+'% cancer; High &gt; '+
+      bivCuts.svi[1].toFixed(2)+' SVI / '+bivCuts.cancer[1]+'% cancer.</div>' : '';
+    return '<div class="biv"><div class="biv-y"><span>Low</span><span>Cancer →</span><span>High</span></div>'+
+      '<div class="biv-grid">'+cells+'</div>'+
+      '<div class="biv-x"><span>Low</span><span>SVI →</span><span>High</span></div></div>'+note;
+  }
 
   var cully = L.esri.featureLayer({
     url: 'https://services8.arcgis.com/tblHe99qQFMcNzpC/arcgis/rest/services/Cully_Boundary/FeatureServer/0',
@@ -282,7 +343,7 @@
     }
   }).addTo(map);
 
-  L.control.layers(null, {'SVI by tract': svi, 'Cully boundary': cully, 'DEQ permit sites': deq},
+  L.control.layers(null, {'SVI by tract': svi, 'Cancer × SVI (bivariate)': biv, 'Cully boundary': cully, 'DEQ permit sites': deq},
     {collapsed:false, position:'topleft'}).addTo(map);
 
   /* ---------- Legend ---------- */
@@ -305,6 +366,9 @@
       h += '<h4>Social vulnerability (SVI)</h4>';
       [['#fbb4b9','0 – 0.25 (lowest)'],['#f768a1','0.25 – 0.5'],['#c51b8a','0.5 – 0.75'],['#7a0177','0.75 – 1 (highest)'],['#999999','No data']]
         .forEach(function(c){ h += row('', 'background:'+c[0]+';opacity:.8', c[1]); });
+    }
+    if (map.hasLayer(biv)) {
+      h += '<h4>Cancer prevalence × SVI</h4>' + bivLegendHtml();
     }
     if (map.hasLayer(cully)) {
       h += '<h4>Boundary</h4>' + row('line','border-color:#7af5ca','Cully');
