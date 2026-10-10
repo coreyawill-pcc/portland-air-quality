@@ -78,7 +78,6 @@
           <option value="World_Topo_Map">Topographic</option>
           <option value="Canvas/World_Light_Gray_Base">Light gray canvas</option>
           <option value="Canvas/World_Dark_Gray_Base">Dark gray canvas</option>
-          <option value="World_Imagery">Imagery</option>
           <option value="World_Imagery" selected>Imagery</option>
         </select>
       </label>
@@ -92,7 +91,6 @@
 
 <script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/esri-leaflet@3.0.12/dist/esri-leaflet.js"></script>
-  
 <script>
 (function(){
   var BANDS=[[50,'Good','#2f9e44'],[100,'Moderate','#f2c200'],[150,'Unhealthy for sensitive groups','#f08c00'],
@@ -230,18 +228,56 @@
     var avg=Math.round(vals.reduce(function(a,b){return a+b;},0)/vals.length);
     $('stats').innerHTML='<div><b>'+Math.min.apply(null,vals)+'</b>low</div><div><b>'+avg+'</b>average</div><div><b>'+Math.max.apply(null,vals)+'</b>peak</div>';
   }
-/* ---------- Cully boundary (ArcGIS Online) ---------- */
-var cully = L.esri.featureLayer({
-  url: 'https://services8.arcgis.com/tblHe99qQFMcNzpC/arcgis/rest/services/Cully_Boundary/FeatureServer/0',
-  style: function(){ return {color:'#7af5ca', weight:3, fillColor:'#7af5ca', fillOpacity:0.08}; },
-  onEachFeature: function(f, layer){
-    var p = f.properties;
-    layer.bindPopup('<b>'+(p.NAME||'Cully')+'</b><br>Jurisdiction: '+(p.JURIS||'–')+
-      (p.SVI!=null?'<br>SVI: '+p.SVI:''));
-  }
-}).addTo(map); cully.once('load', function(){ cully.query().bounds(function(err, b){ if(!err) map.fitBounds(b); }); });
 
-L.control.layers(null, {'Cully boundary': cully}, {collapsed:false, position:'topleft'}).addTo(map);
+  /* ---------- ArcGIS Online layers ---------- */
+  map.createPane('svi'); map.getPane('svi').style.zIndex = 350;
+  function sviColor(v){
+    if (v == null || v < 0) return '#999999';
+    return v > 0.75 ? '#7a0177' : v > 0.5 ? '#c51b8a' : v > 0.25 ? '#f768a1' : '#fbb4b9';
+  }
+  function pct(v){ return (v == null || v < 0) ? '–' : v + '%'; }
+  function tpy(v){ return v == null ? '–' : v; }
+
+  var svi = L.esri.featureLayer({
+    url: 'https://services8.arcgis.com/tblHe99qQFMcNzpC/arcgis/rest/services/SVI_and_Cancer_by_Tract/FeatureServer/0',
+    pane: 'svi',
+    style: function(f){ return {color:'#ffffff', weight:1, fillColor:sviColor(f.properties.SVI), fillOpacity:0.55}; },
+    onEachFeature: function(f, layer){
+      var p = f.properties;
+      layer.bindPopup('<b>Tract '+(p.TRACT||'')+'</b> · '+(p.CountyName||'')+' County<br>'+
+        'Population: '+(p.TotalPopul!=null ? p.TotalPopul.toLocaleString() : '–')+'<br>'+
+        'SVI: '+(p.SVI!=null && p.SVI>=0 ? p.SVI.toFixed(2) : '–')+'<br>'+
+        'Cancer: '+pct(p.CANCER_Cru)+' · Asthma: '+pct(p.CASTHMA_Cr)+' · COPD: '+pct(p.COPD_Crude));
+    }
+  });
+
+  var cully = L.esri.featureLayer({
+    url: 'https://services8.arcgis.com/tblHe99qQFMcNzpC/arcgis/rest/services/Cully_Boundary/FeatureServer/0',
+    style: function(){ return {color:'#7af5ca', weight:3, fillColor:'#7af5ca', fillOpacity:0.06}; },
+    onEachFeature: function(f, layer){
+      var p = f.properties;
+      layer.bindPopup('<b>'+(p.NAME||'Cully')+'</b><br>Jurisdiction: '+(p.JURIS||'–')+(p.SVI!=null?'<br>SVI: '+p.SVI:''));
+    }
+  }).addTo(map);
+
+  var deq = L.esri.featureLayer({
+    url: 'https://services8.arcgis.com/tblHe99qQFMcNzpC/arcgis/rest/services/DEQ_permit_sites/FeatureServer/0',
+    pointToLayer: function(f, latlng){
+      var big = f.properties.USER_Largest_Polluter_Flag;
+      return L.circleMarker(latlng, {radius:7, color:'#fff', weight:2, fillColor: big ? '#e8590c' : '#7048e8', fillOpacity:.95});
+    },
+    onEachFeature: function(f, layer){
+      var p = f.properties;
+      layer.bindPopup('<b>'+(p.USER_Facility_Name||'Permit site')+'</b><br>'+(p.USER_Full_Address||'')+'<br>'+
+        'Permit: '+(p.USER_Permit_Type||'–')+'<br>Status: '+(p.USER_Operating_Status||'–')+'<br>'+
+        'PM2.5: '+tpy(p.USER_PSEL_PM25_tpy)+' tpy · NOx: '+tpy(p.USER_PSEL_NOx_tpy)+' tpy'+
+        (p.USER_Factsheet_Concern?'<br>Concern: '+p.USER_Factsheet_Concern:''));
+    }
+  }).addTo(map);
+
+  L.control.layers(null, {'SVI by tract': svi, 'Cully boundary': cully, 'DEQ permit sites': deq},
+    {collapsed:false, position:'topleft'}).addTo(map);
+
   /* ---------- wiring ---------- */
   async function refresh(){
     status('Loading…');
