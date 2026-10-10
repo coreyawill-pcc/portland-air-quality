@@ -79,6 +79,7 @@
           <option value="Canvas/World_Light_Gray_Base">Light gray canvas</option>
           <option value="Canvas/World_Dark_Gray_Base">Dark gray canvas</option>
           <option value="World_Imagery">Imagery</option>
+          <option value="World_Imagery" selected>Imagery</option>
         </select>
       </label>
       <button id="refresh" type="button">Refresh now</button>
@@ -125,7 +126,7 @@
       {maxZoom:19,attribution:'Tiles &copy; Esri &mdash; Esri, HERE, Garmin, USGS, NGA'}).addTo(map);
     baseLayer.bringToBack();
   }
-  setBase('World_Street_Map');
+  setBase('World_Imagery');
 
   var markers=L.layerGroup().addTo(map), current=[], selected=null, histCache={}, range=72;
   var $=function(id){return document.getElementById(id);};
