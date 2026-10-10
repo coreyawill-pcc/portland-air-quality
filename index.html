@@ -90,6 +90,8 @@
 </div>
 
 <script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/esri-leaflet@3.0.12/dist/esri-leaflet.js"></script>
+  
 <script>
 (function(){
   var BANDS=[[50,'Good','#2f9e44'],[100,'Moderate','#f2c200'],[150,'Unhealthy for sensitive groups','#f08c00'],
@@ -227,7 +229,18 @@
     var avg=Math.round(vals.reduce(function(a,b){return a+b;},0)/vals.length);
     $('stats').innerHTML='<div><b>'+Math.min.apply(null,vals)+'</b>low</div><div><b>'+avg+'</b>average</div><div><b>'+Math.max.apply(null,vals)+'</b>peak</div>';
   }
+/* ---------- Cully boundary (ArcGIS Online) ---------- */
+var cully = L.esri.featureLayer({
+  url: 'https://services8.arcgis.com/tblHe99qQFMcNzpC/arcgis/rest/services/Cully_Boundary/FeatureServer/0',
+  style: function(){ return {color:'#7af5ca', weight:3, fillColor:'#7af5ca', fillOpacity:0.08}; },
+  onEachFeature: function(f, layer){
+    var p = f.properties;
+    layer.bindPopup('<b>'+(p.NAME||'Cully')+'</b><br>Jurisdiction: '+(p.JURIS||'–')+
+      (p.SVI!=null?'<br>SVI: '+p.SVI:''));
+  }
+}).addTo(map); cully.once('load', function(){ cully.query().bounds(function(err, b){ if(!err) map.fitBounds(b); }); });
 
+L.control.layers(null, {'Cully boundary': cully}, {collapsed:false, position:'topleft'}).addTo(map);
   /* ---------- wiring ---------- */
   async function refresh(){
     status('Loading…');
