@@ -66,11 +66,8 @@
       <label>Data source
         <select id="source">
           <option value="om">Open-Meteo (no key needed)</option>
-          <option value="pa" selected>PurpleAir sensors (API key)</option>
+          <option value="pa" selected>PurpleAir sensors (live)</option>
         </select>
-      </label>
-      <label id="keyrow">PurpleAir read API key
-        <input id="key" type="password" autocomplete="off" placeholder="Paste read key">
       </label>
       <label>Basemap (Esri)
         <select id="basemap">
@@ -162,28 +159,22 @@
     status('Updated '+new Date().toLocaleTimeString()+' · modeled hourly US AQI (CAMS) at '+current.length+' points');
   }
 
-  /* ---------- PurpleAir ---------- */
-  async function loadPA(){
-    var key=$('key').value.trim(); if(!key)throw new Error('Enter a PurpleAir read API key.');
-    var url='https://api.purpleair.com/v1/sensors?fields=name,latitude,longitude,pm2.5_cf_1,humidity'+
-      '&location_type=0&max_age=3600&nwlng=-122.85&nwlat=45.65&selng=-122.47&selat=45.43';
-    var r=await fetch(url,{headers:{'X-API-Key':key}});
-    if(!r.ok)throw new Error('PurpleAir returned '+r.status+(r.status===403?' (check key)':''));
-    var d=await r.json(), f=d.fields, ix=function(n){return f.indexOf(n);};
-    histCache={};
-    current=d.data.map(function(row){
-      var pm=paCorrect(row[ix('pm2.5_cf_1')],row[ix('humidity')]);
-      return {id:'pa'+row[ix('sensor_index')],idx:row[ix('sensor_index')],name:row[ix('name')],
-        lat:row[ix('latitude')],lon:row[ix('longitude')],aqi:pm2aqi(pm),pm:pm,src:'pa'};
-    }).filter(function(s){return s.lat!=null&&s.aqi!=null;});
-    status('Updated '+new Date().toLocaleTimeString()+' · '+current.length+' PurpleAir outdoor sensors (EPA-corrected)');
+  /* ---------- PurpleAir (read from sensors.json written by the GitHub Action) ---------- */
+  var DATA_URL_OVERRIDE='';  // optional: full URL of sensors.json
+  function dataUrl(){
+    if(DATA_URL_OVERRIDE)return DATA_URL_OVERRIDE;
+    var m=location.hostname.match(/^(.+)\.github\.io$/), repo=location.pathname.split('/')[1];
+    if(m&&repo)return 'https://raw.githubusercontent.com/'+m[1]+'/'+repo+'/data/sensors.json';
+    throw new Error('Set DATA_URL_OVERRIDE in the page (not running on github.io).');
   }
-  async function histPA(s){
-    var key=$('key').value.trim(), start=Math.floor(Date.now()/1000)-7*86400;
-    var url='https://api.purpleair.com/v1/sensors/'+s.idx+'/history?fields=pm2.5_cf_1,humidity&average=60&start_timestamp='+start;
-    var r=await fetch(url,{headers:{'X-API-Key':key}}); if(!r.ok)throw new Error('History request failed ('+r.status+')');
-    var d=await r.json(), f=d.fields, ti=f.indexOf('time_stamp'), pi=f.indexOf('pm2.5_cf_1'), hi=f.indexOf('humidity');
-    return d.data.map(function(row){return [row[ti]*1000,pm2aqi(paCorrect(row[pi],row[hi]))];}).filter(function(p){return p[1]!=null;});
+  async function loadPA(){
+    var r=await fetch(dataUrl()+'?t='+Date.now());
+    if(!r.ok)throw new Error('sensors.json not found ('+r.status+'). Has the workflow run yet?');
+    var d=await r.json(); histCache={};
+    current=d.sensors.map(function(s){
+      histCache['pa'+s.id]=s.hist.map(function(p){return [p[0]*1000,p[1]];});
+      return {id:'pa'+s.id,name:s.name,lat:s.lat,lon:s.lon,aqi:s.aqi,pm:s.pm,src:'pa'};});
+    status('Updated '+new Date(d.updated*1000).toLocaleTimeString()+' · '+current.length+' PurpleAir sensors (EPA-corrected)');
   }
 
   /* ---------- Detail panel + chart ---------- */
@@ -199,7 +190,7 @@
     $('detail').querySelectorAll('.range button').forEach(function(btn){
       btn.onclick=function(){range=+btn.dataset.h;select(s);};});
     try{
-      if(!histCache[s.id]){ $('chart').outerHTML='<p class="empty" id="chart">Loading history…</p>'; histCache[s.id]=await histPA(s); }
+      if(!histCache[s.id]){ $('chart').outerHTML='<p class="empty" id="chart">Loading history…</p>'; histCache[s.id]=[]; }
       if(selected!==s)return;
       if(!$('detail').querySelector('svg')){ var p=$('chart'); var sv=document.createElementNS('http://www.w3.org/2000/svg','svg'); sv.id='chart'; p.replaceWith(sv); }
       plot(histCache[s.id]);
@@ -286,18 +277,11 @@
       draw();
     }catch(e){ status('Could not load data: '+e.message); }
   }
-  $('source').onchange=function(){
-    $('keyrow').style.display=this.value==='pa'?'grid':'none'; selected=null; markers.clearLayers();
-    $('detail').innerHTML='<p class="empty">No station selected.</p>';
-    try{ var k=localStorage.getItem('pa_key'); if(k&&!$('key').value)$('key').value=k; }catch(e){}
-    if(this.value==='om'||$('key').value)refresh(); else status('Enter a PurpleAir read key, then press Refresh.');
-  };
-  $('key').onchange=function(){try{localStorage.setItem('pa_key',this.value.trim());}catch(e){} if($('source').value==='pa')refresh();};
+  $('source').onchange=function(){ selected=null; markers.clearLayers();
+    $('detail').innerHTML='<p class="empty">No station selected.</p>'; refresh(); };
   $('basemap').onchange=function(){setBase(this.value);};
   $('refresh').onclick=function(){histCache={};refresh();};
-  try{ var k0=localStorage.getItem('pa_key'); if(k0)$('key').value=k0; }catch(e){}
-  if($('source').value==='om'||$('key').value) refresh(); else status('Enter a PurpleAir read key to load sensors.');
-  setInterval(function(){ if($('source').value==='om'||$('key').value) refresh(); },10*60*1000);
+  refresh(); setInterval(refresh,10*60*1000);
 })();
 </script>
 </body>
