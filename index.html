@@ -61,6 +61,7 @@
   .biv-x{grid-column:2;display:flex;justify-content:space-between;font-size:.7rem;color:var(--muted)}
   .biv-grid{display:grid;grid-template-columns:repeat(3,30px);grid-template-rows:repeat(3,30px);gap:1px}
   .biv-note{font-size:.7rem;color:var(--muted);margin-top:4px;max-width:150px}
+  .legend-box .slot{width:20px;height:20px;display:grid;place-items:center;flex:none}
   @media (max-width:800px){
     .app{grid-template-columns:1fr;grid-template-rows:55% 45%}
     aside{border-left:0;border-top:1px solid var(--line)}
@@ -236,8 +237,8 @@
   /* ---------- ArcGIS Online layers ---------- */
   // DRAW ORDER: bigger number = drawn on top. Keep every value different (range 250-590;
   // 'stations' is the AQI pins and may go up to 640). Edit these numbers to reorder.
-  var DRAW_ORDER = { svi: 350, biv: 355, cully: 360, deq: 380, stations: 600 };
-  ['svi','biv','cully','deq'].forEach(function(n){
+  var DRAW_ORDER = { svi: 350, biv: 355, schools: 358, cully: 360, housing: 370, deq: 380, stations: 600 };
+  ['svi','biv','schools','cully','housing','deq'].forEach(function(n){
     map.createPane(n); map.getPane(n).style.zIndex = DRAW_ORDER[n];
   });
   map.getPane('markerPane').style.zIndex = DRAW_ORDER.stations;
@@ -317,6 +318,18 @@
       '<div class="biv-x"><span>Low</span><span>SVI →</span><span>High</span></div></div>'+note;
   }
 
+  /* ---------- School sites ---------- */
+  var schools = L.esri.featureLayer({
+    url: 'https://services8.arcgis.com/tblHe99qQFMcNzpC/arcgis/rest/services/School_Sites_only/FeatureServer/0',
+    pane: 'schools',
+    style: function(){ return {color:'#6e6e6e', weight:1, fillColor:'#fcbadc', fillOpacity:0.65}; },
+    onEachFeature: function(f, layer){
+      var p = f.properties;
+      layer.bindPopup('<b>'+(p.SITE_NAME||'School site')+'</b>'+
+        (p.LEVEL_NAME?'<br>Level: '+p.LEVEL_NAME:'')+(p.TYPE?'<br>Type: '+p.TYPE:'')+(p.COUNTY?'<br>County: '+p.COUNTY:''));
+    }
+  });
+
   var cully = L.esri.featureLayer({
     url: 'https://services8.arcgis.com/tblHe99qQFMcNzpC/arcgis/rest/services/Cully_Boundary/FeatureServer/0',
     pane: 'cully',
@@ -326,6 +339,26 @@
       layer.bindPopup('<b>'+(p.NAME||'Cully')+'</b><br>Jurisdiction: '+(p.JURIS||'–')+(p.SVI!=null?'<br>SVI: '+p.SVI:''));
     }
   }).addTo(map);
+
+  /* ---------- Affordable housing (sized by total units) ---------- */
+  var HOUSING_CLASSES = [[28,'0 – 28',3],[90,'29 – 90',4.5],[189,'91 – 189',6],[400,'190 – 400',7.5],[711,'401 – 711',9]];
+  function housingRadius(u){
+    for (var i = 0; i < HOUSING_CLASSES.length; i++) if (u == null || u <= HOUSING_CLASSES[i][0]) return HOUSING_CLASSES[i][2];
+    return HOUSING_CLASSES[HOUSING_CLASSES.length-1][2];
+  }
+  var housing = L.esri.featureLayer({
+    url: 'https://services8.arcgis.com/tblHe99qQFMcNzpC/arcgis/rest/services/PDX_Affordable_Housing/FeatureServer/0',
+    pane: 'housing',
+    pointToLayer: function(f, latlng){
+      return L.circleMarker(latlng, {pane:'housing', radius: housingRadius(f.properties.Units),
+        color:'#ffffff', weight:1.5, fillColor:'#894465', fillOpacity:0.9});
+    },
+    onEachFeature: function(f, layer){
+      var p = f.properties;
+      layer.bindPopup('<b>'+(p.Proj_Name||'Affordable housing')+'</b><br>Total units: '+
+        (p.Units!=null ? p.Units.toLocaleString() : '–'));
+    }
+  });
 
   var deq = L.esri.featureLayer({
     url: 'https://services8.arcgis.com/tblHe99qQFMcNzpC/arcgis/rest/services/DEQ_permit_sites/FeatureServer/0',
@@ -343,7 +376,7 @@
     }
   }).addTo(map);
 
-  L.control.layers(null, {'SVI by tract': svi, 'Cancer × SVI (bivariate)': biv, 'Cully boundary': cully, 'DEQ permit sites': deq},
+  L.control.layers(null, {'SVI by tract': svi, 'Cancer × SVI (bivariate)': biv, 'School sites': schools, 'Cully boundary': cully, 'Affordable housing': housing, 'DEQ permit sites': deq},
     {collapsed:false, position:'topleft'}).addTo(map);
 
   /* ---------- Legend ---------- */
@@ -372,6 +405,16 @@
     }
     if (map.hasLayer(cully)) {
       h += '<h4>Boundary</h4>' + row('line','border-color:#7af5ca','Cully');
+    }
+    if (map.hasLayer(schools)) {
+      h += '<h4>Schools</h4>' + row('', 'background:#fcbadc;border-color:#6e6e6e', 'School site');
+    }
+    if (map.hasLayer(housing)) {
+      h += '<h4>Affordable housing (total units)</h4>';
+      HOUSING_CLASSES.forEach(function(c){
+        var d = c[2]*2;
+        h += '<div class="row"><span class="slot"><i style="display:block;width:'+d+'px;height:'+d+'px;border-radius:50%;background:#894465;border:1.5px solid #fff;box-shadow:0 0 0 1px rgba(0,0,0,.4)"></i></span>'+c[1]+'</div>';
+      });
     }
     if (map.hasLayer(deq)) {
       h += '<h4>DEQ permit sites</h4>' +
