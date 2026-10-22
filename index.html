@@ -62,6 +62,15 @@
   .biv-grid{display:grid;grid-template-columns:repeat(3,30px);grid-template-rows:repeat(3,30px);gap:1px}
   .biv-note{font-size:.7rem;color:var(--muted);margin-top:4px;max-width:150px}
   .legend-box .slot{width:20px;height:20px;display:grid;place-items:center;flex:none}
+  .wind-box{width:250px}
+  .wind-title{font-weight:700;font-size:.85rem;margin-bottom:4px}
+  .wind-row{display:flex;gap:6px;align-items:center;margin:5px 0}
+  .wind-row select{flex:1;font-size:.78rem;padding:3px 4px;min-width:0}
+  .wind-row input[type=range]{flex:1;min-width:0}
+  .wind-row button{padding:3px 11px;font-size:.8rem}
+  .wind-label{font-weight:700;font-size:1rem;margin:2px 0}
+  .wind-note{font-size:.7rem;color:var(--muted);margin-top:3px;max-width:230px}
+  .wind-box svg{color:var(--ink);display:block;margin-top:4px}
   @media (max-width:800px){
     .app{grid-template-columns:1fr;grid-template-rows:55% 45%}
     aside{border-left:0;border-top:1px solid var(--line)}
@@ -237,8 +246,8 @@
   /* ---------- ArcGIS Online layers ---------- */
   // DRAW ORDER: bigger number = drawn on top. Keep every value different (range 250-590;
   // 'stations' is the AQI pins and may go up to 640). Edit these numbers to reorder.
-  var DRAW_ORDER = { svi: 350, biv: 355, schoolsParks: 358, cullyHousing: 359, cully: 360, housing: 370, deq: 380, stations: 600 };
-  ['svi','biv','schoolsParks','cullyHousing','cully','housing','deq'].forEach(function(n){
+  var DRAW_ORDER = { svi: 350, biv: 355, schoolsParks: 358, cullyHousing: 359, cully: 360, housing: 370, wind: 375, deq: 380, stations: 600 };
+  ['svi','biv','schoolsParks','cullyHousing','cully','housing','wind','deq'].forEach(function(n){
     map.createPane(n); map.getPane(n).style.zIndex = DRAW_ORDER[n];
   });
   map.getPane('markerPane').style.zIndex = DRAW_ORDER.stations;
@@ -410,7 +419,174 @@
     }
   }).addTo(map);
 
-  L.control.layers(null, {'SVI by tract': svi, 'Cancer × SVI (bivariate)': biv, 'Schools & parks': schoolsParks, 'Cully housing types': cullyHousing, 'Cully boundary': cully, 'Affordable housing': housing, 'DEQ permit sites': deq},
+  /* ---------- Downwind footprints (animated; reads wind_stats.json made by wind_stats.py) ---------- */
+  var WIND_URL = 'wind_stats.json';           // sits next to index.html
+  var DEQ_URL = 'https://services8.arcgis.com/tblHe99qQFMcNzpC/arcgis/rest/services/DEQ_permit_sites/FeatureServer/0';
+  var WIND_RADIUS_M = 2000;                   // illustrative wedge length (screening, not a dispersion model)
+  var STATION_PTS = {PDX:[45.5887,-122.5975], TTD:[45.5494,-122.4010]};   // each site uses its nearest station
+  var WIND_BREAKS = [1,3,6,10,20];            // % of hours the wind blows toward a sector
+  var WIND_COLORS = ['#ffffb2','#fecc5c','#fd8d3c','#e31a1c','#800026'];
+  var SEASON_MONTHS = {Winter:[11,0,1], Spring:[2,3,4], Summer:[5,6,7], Fall:[8,9,10]};
+  var MON = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+  var ALL12 = [0,1,2,3,4,5,6,7,8,9,10,11], ALL24 = [];
+  for (var hh = 0; hh < 24; hh++) ALL24.push(hh);
+  var WIND = null, windSites = [], windFrame = 0, windTimer = null, windReady = null;
+  var windUI = {mode:'hour', season:'All'};
+  var windLayer = L.layerGroup();
+
+  function hourLabel(h){ return (h % 12 || 12) + (h < 12 ? ' AM' : ' PM'); }
+  function pad2(n){ return (n < 10 ? '0' : '') + n; }
+  function windFrames(){
+    var out = [], i;
+    if (windUI.mode === 'hour') {
+      var s = windUI.season, months = s === 'All' ? ALL12 : SEASON_MONTHS[s];
+      for (i = 0; i < 24; i++) out.push({period:(s === 'All' ? '' : s + '_') + 'h' + pad2(i),
+        label:hourLabel(i) + (s === 'All' ? ' · all year' : ' · ' + s), hours:[i], months:months});
+    } else if (windUI.mode === 'month') {
+      for (i = 0; i < 12; i++) out.push({period:MON[i], label:MON[i] + ' · all hours', hours:ALL24, months:[i]});
+    } else {
+      ['Annual','Winter','Spring','Summer','Fall'].forEach(function(s){
+        out.push({period:s, label:s === 'Annual' ? 'All year' : s, hours:ALL24, months:s === 'Annual' ? ALL12 : SEASON_MONTHS[s]});
+      });
+    }
+    return out;
+  }
+  // % of all hours the wind blows TOWARD each of 16 sectors (rose is by FROM sector: toward j = from (j+8)%16)
+  function towardPct(st, period){
+    var p = WIND.stations[st].periods[period]; if (!p) return null;
+    var out = [];
+    for (var j = 0; j < 16; j++){ var r = p.rose[(j + 8) % 16]; out.push(r[0] + r[1] + r[2] + r[3]); }
+    return out;
+  }
+  function windStyle(v){
+    if (v == null || v < WIND_BREAKS[0]) return {stroke:false, fillColor:'#999999', fillOpacity:0.03};
+    var k = 0; while (k < WIND_BREAKS.length - 1 && v >= WIND_BREAKS[k+1]) k++;
+    return {stroke:false, fillColor:WIND_COLORS[k], fillOpacity:0.6};
+  }
+  function sectorPolygon(lat, lon, j, R){
+    var pts = [[lat, lon]], c = j * 22.5, mPerLon = 111320 * Math.cos(lat * Math.PI / 180);
+    for (var a = c - 11.25; a <= c + 11.26; a += 2.8125) {
+      var r = a * Math.PI / 180;
+      pts.push([lat + R * Math.cos(r) / 111320, lon + R * Math.sin(r) / mPerLon]);
+    }
+    return pts;
+  }
+  function nearestStation(lat, lon){
+    var best = null, bd = 1e9, k = Math.cos(lat * Math.PI / 180);
+    Object.keys(WIND.stations).forEach(function(st){
+      var p = STATION_PTS[st]; if (!p) return;
+      var dx = (lon - p[1]) * k, dy = lat - p[0], d = dx * dx + dy * dy;
+      if (d < bd) { bd = d; best = st; }
+    });
+    return best;
+  }
+  function buildWind(features){
+    windSites = [];
+    features.forEach(function(f){
+      if (!f.geometry || f.geometry.type !== 'Point') return;
+      var lon = f.geometry.coordinates[0], lat = f.geometry.coordinates[1], st = nearestStation(lat, lon);
+      if (!st) return;
+      var wedges = [];
+      for (var j = 0; j < 16; j++) {
+        var w = L.polygon(sectorPolygon(lat, lon, j, WIND_RADIUS_M), {pane:'wind', interactive:false, stroke:false, fillColor:'#999999', fillOpacity:0.03});
+        w.addTo(windLayer); wedges.push(w);
+      }
+      windSites.push({st:st, wedges:wedges});
+    });
+  }
+  function loadWind(){
+    if (windReady) return windReady;
+    windReady = fetch(WIND_URL).then(function(r){
+      if (!r.ok) throw new Error(WIND_URL + ' not found (' + r.status + ')');
+      return r.json();
+    }).then(function(j){
+      WIND = j;
+      return new Promise(function(res, rej){
+        L.esri.query({url: DEQ_URL}).where('1=1').run(function(err, fc){
+          if (err || !fc || !fc.features) return rej(new Error('could not load permit sites'));
+          buildWind(fc.features); res();
+        });
+      });
+    });
+    return windReady;
+  }
+  function eastAvg(st, f){
+    var g = WIND.stations[st].east_wind_pct, sum = 0, n = 0;
+    f.months.forEach(function(m){ f.hours.forEach(function(h){ sum += g[m][h]; n++; }); });
+    return n ? sum / n : 0;
+  }
+  function drawHeat(f){
+    var svg = $('wheat'); if (!WIND.stations.TTD) { svg.innerHTML = ''; return; }
+    var g = WIND.stations.TTD.east_wind_pct, cw = 9, ch = 9, ox = 16, h = '', selM = {}, selH = {}, m, x;
+    f.months.forEach(function(v){ selM[v] = 1; }); f.hours.forEach(function(v){ selH[v] = 1; });
+    for (m = 0; m < 12; m++) {
+      h += '<text x="'+(ox-3)+'" y="'+(m*ch+8)+'" text-anchor="end" font-size="7" fill="currentColor" opacity=".7">'+MON[m].charAt(0)+'</text>';
+      for (x = 0; x < 24; x++) {
+        var op = (0.08 + 0.92 * Math.min(g[m][x] / 50, 1)) * (selM[m] && selH[x] ? 1 : 0.3);
+        h += '<rect x="'+(ox+x*cw)+'" y="'+(m*ch)+'" width="'+(cw-1)+'" height="'+(ch-1)+'" fill="#0d6b63" fill-opacity="'+op.toFixed(2)+'"/>';
+      }
+    }
+    ['12a','6a','12p','6p'].forEach(function(t, i){
+      h += '<text x="'+(ox+i*6*cw)+'" y="'+(12*ch+9)+'" font-size="7" fill="currentColor" opacity=".7">'+t+'</text>';
+    });
+    svg.innerHTML = h;
+  }
+  function setSlider(){
+    var n = windFrames().length; $('wslide').max = n - 1; $('wslide').value = Math.min(windFrame, n - 1);
+  }
+  function renderWind(){
+    if (!WIND || !windSites.length) return;
+    var frames = windFrames(); windFrame = Math.min(windFrame, frames.length - 1);
+    var f = frames[windFrame], t = {};
+    Object.keys(WIND.stations).forEach(function(st){ t[st] = towardPct(st, f.period); });
+    windSites.forEach(function(s){
+      var v = t[s.st]; for (var j = 0; j < 16; j++) s.wedges[j].setStyle(windStyle(v ? v[j] : null));
+    });
+    $('wlabel').textContent = f.label;
+    var cov = Object.keys(WIND.stations).map(function(st){
+      var p = WIND.stations[st].periods[f.period]; return p ? st + ' ' + (100 - p.calm - p.variable).toFixed(0) + '%' : '';
+    }).filter(Boolean).join(' · ');
+    $('wnote').innerHTML = (WIND.stations.TTD ? 'East-wind hours at Troutdale: <b>' + eastAvg('TTD', f).toFixed(0) + '%</b><br>' : '') +
+      'Hours with a recorded wind direction: ' + cov;
+    drawHeat(f);
+  }
+  function stopWind(){ if (windTimer) clearInterval(windTimer); windTimer = null; $('wplay').textContent = '▶'; }
+  function startWind(){
+    stopWind(); $('wplay').textContent = '❚❚';
+    windTimer = setInterval(function(){ windFrame = (windFrame + 1) % windFrames().length; setSlider(); renderWind(); }, 900);
+  }
+
+  var windCtl = L.control({position:'topright'});
+  windCtl.onAdd = function(){
+    var d = L.DomUtil.create('div', 'legend-box wind-box');
+    d.style.display = 'none';
+    d.innerHTML = '<div class="wind-title">Downwind footprints</div>' +
+      '<div class="wind-row"><select id="wmode" aria-label="Animate by"><option value="hour">By hour of day</option>' +
+      '<option value="month">By month</option><option value="season">By season</option></select>' +
+      '<select id="wseason" aria-label="Season"><option value="All">All year</option><option>Winter</option>' +
+      '<option>Spring</option><option>Summer</option><option>Fall</option></select></div>' +
+      '<div class="wind-row"><button id="wplay" type="button" aria-label="Play or pause">▶</button>' +
+      '<input id="wslide" type="range" min="0" max="23" value="0" aria-label="Time step"></div>' +
+      '<div class="wind-label" id="wlabel"></div><div class="wind-note" id="wnote"></div>' +
+      '<svg id="wheat" viewBox="0 0 240 120" width="240" height="120" role="img" aria-label="East-wind frequency by month and hour"></svg>' +
+      '<div class="wind-note">Troutdale east-wind hours (wind from the east at 10+ kt): months down, hours across; darker = more often.</div>';
+    L.DomEvent.disableClickPropagation(d); L.DomEvent.disableScrollPropagation(d);
+    return d;
+  };
+  windCtl.addTo(map);
+  var windBox = windCtl.getContainer();
+  $('wmode').onchange = function(){ windUI.mode = this.value; $('wseason').disabled = windUI.mode !== 'hour'; windFrame = 0; setSlider(); renderWind(); };
+  $('wseason').onchange = function(){ windUI.season = this.value; renderWind(); };
+  $('wslide').oninput = function(){ windFrame = +this.value; renderWind(); };
+  $('wplay').onclick = function(){ if (windTimer) stopWind(); else startWind(); };
+  windLayer.on('add', function(){
+    windBox.style.display = ''; $('wnote').textContent = 'Loading wind data…';
+    loadWind().then(function(){ setSlider(); renderWind(); })
+      .catch(function(e){ windReady = null; $('wnote').textContent = 'Could not load wind data: ' + e.message; });
+  });
+  windLayer.on('remove', function(){ stopWind(); windBox.style.display = 'none'; });
+
+  L.control.layers(null, {'SVI by tract': svi, 'Cancer × SVI (bivariate)': biv, 'Schools & parks': schoolsParks, 'Cully housing types': cullyHousing, 'Cully boundary': cully, 'Affordable housing': housing, 'DEQ permit sites': deq, 'Downwind footprints (animated)': windLayer},
     {collapsed:false, position:'topleft'}).addTo(map);
 
   /* ---------- Legend ---------- */
@@ -454,6 +630,13 @@
         var d = c[2]*2;
         h += '<div class="row"><span class="slot"><i style="display:block;width:'+d+'px;height:'+d+'px;border-radius:50%;background:#894465;border:1.5px solid #fff;box-shadow:0 0 0 1px rgba(0,0,0,.4)"></i></span>'+c[1]+'</div>';
       });
+    }
+    if (map.hasLayer(windLayer)) {
+      h += '<h4>Downwind footprints</h4>';
+      var wl = ['under 1% (faint)','1 – 3%','3 – 6%','6 – 10%','10 – 20%','20% or more'];
+      h += row('', 'background:#999;opacity:.3', wl[0]);
+      WIND_COLORS.forEach(function(c, i){ h += row('', 'background:'+c+';opacity:.9', wl[i+1]); });
+      h += '<div class="wind-note">Share of hours the wind blows toward each direction, from the nearest airport (Troutdale or PDX). 2 km wedges are illustrative, not a dispersion model.</div>';
     }
     if (map.hasLayer(deq)) {
       h += '<h4>DEQ permit sites</h4>' +
